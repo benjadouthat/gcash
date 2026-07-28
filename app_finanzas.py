@@ -6,31 +6,6 @@ import re
 st.set_page_config(page_title="Mi Conciliador Financiero", layout="wide")
 st.title("📊 Conciliador Bancario y Tarjetas (Integración Fiwind)")
 
-# 1. Función para leer el Excel de Banco Galicia (ARS y USD)
-def leer_excel_galicia(archivo):
-    df = pd.read_excel(archivo, skiprows=5, names=["Fecha", "Movimiento", "Débito", "Crédito", "Saldo Parcial", "Comentarios"])
-    df = df.dropna(subset=['Fecha'])
-    
-    for col in ['Débito', 'Crédito']:
-        if df[col].dtype == 'object':
-            df[col] = df[col].str.replace('.', '', regex=False).str.replace(',', '.', regex=False).astype(float)
-        else:
-            df[col] = df[col].astype(float)
-            
-    df['Monto'] = df['Crédito'].fillna(0) + df['Débito'].fillna(0)
-    df['Categoria'] = 'Varios Bancario'
-    
-    # Asumimos ARS por defecto, a menos que el nombre del archivo indique USD
-    df['Moneda'] = 'USD' if 'USD' in archivo.name.upper() else 'ARS'
-    
-    # Reglas automáticas para movimientos bancarios
-    df.loc[df['Movimiento'].str.contains('CUENTA PROPIA', case=False, na=False), 'Categoria'] = 'Transferencia Propia'
-    df.loc[df['Movimiento'].str.contains('TITULOS|AL30', case=False, na=False), 'Categoria'] = 'Inversiones'
-    df.loc[df['Movimiento'].str.contains('NORA', case=False, na=False), 'Categoria'] = 'Sueldo Nora'
-    df.loc[df['Movimiento'].str.contains('ROCIO|ROCÍO', case=False, na=False), 'Categoria'] = 'Cuota Rocío'
-    df.loc[df['Movimiento'].str.contains('ESTEBAN', case=False, na=False), 'Categoria'] = 'Celular Esteban'
-    
-    return df[['Fecha', 'Movimiento', 'Monto', 'Moneda', 'Categoria']]
 
 # 2. Función para extraer gastos de PDFs (Tarjetas y Mercado Pago)
 def extraer_tarjeta_pdf(archivo, clave=""):
