@@ -1,4 +1,4 @@
 pip install streamlit pandas plotly openpyxl xlsxwriter pypdf
 # (PyPDF2 also works as fallback)
 
-streamlit run conciliador_app.py
+streamlit run app_finanzas.py
