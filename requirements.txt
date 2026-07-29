@@ -5,5 +5,3 @@ openpyxl
 xlsxwriter
 pypdf[crypto]
 # (PyPDF2 also works as fallback)
-
-streamlit run app_finanzas.py
