@@ -1,5 +1,4 @@
-streamlit
-pandas
-pypdf
-cryptography
-openpyxl
+pip install streamlit pandas plotly openpyxl xlsxwriter pypdf
+# (PyPDF2 also works as fallback)
+
+streamlit run conciliador_app.py
