@@ -59,6 +59,10 @@ DEFAULT_CATEGORY_RULES: Dict[str, List[str]] = {
         r"E\.P\.E\.C", r"ECOGAS", r"MUNICIPALIDAD", r"CSIERRAS", r"NATURGY",
         r"EDESA", r"RENTAS", r"AYSA", r"METROGAS", r"TELECOM", r"PERSONAL", r"CLARO", r"MOVISTAR",
     ],
+    "Impuestos y Percepciones": [
+        r"IMPUESTO\s+DE\s+SELLOS", r"IMP\.?\s*SELLOS", r"PERCEPCION", r"PERCEP\.?",
+        r"RG\s*4815", r"DTO\.?\s*354", r"DTO\.?\s*2141", r"IMPUESTO\s+PAIS", r"IMP\.\s*PAIS",
+    ],
     "Mantenimiento Ford Ranger 2013": [r"YPF", r"AXION", r"COMBUSTIBLE", r"SHELL", r"PUMASHELL"],
     "Apps y Transporte": [r"UBER", r"PEDIDOS YA", r"PEDIDOSYA", r"CABIFY", r"DIDI", r"RAPPI"],
     "Rendimiento Inversiones": [r"Ganancia", r"Rendimiento"],
@@ -198,17 +202,17 @@ def _detect_card_fuente(filename: str, sample_text: str) -> str:
     """Detecta la tarjeta y devuelve el código de Fuente."""
     blob = f"{filename} {sample_text}".upper()
     # Orden importa: más específico primero
-    if re.search(r"\bNX\s*VISA\b|\bNARANJA\s*X\s*VISA\b|\bTNX\s*VISA\b", blob):
+    if re.search(r"\bNX\s*VISA\b|\bNARANJA\s*X\s*VISA\b|\bTNX\s*VISA\b|\bVISA\s*NARANJA", blob):
         return "TNX Visa"
-    if re.search(r"\bNARANJA\s*X\b|\bTNX\b", blob):
+    if re.search(r"\bNARANJA\s*X\b|\bTARJETA\s*NARANJA\b|\bTNX\b|\bNARANJAX\b", blob):
         return "TNX"
-    if re.search(r"\bMASTERCARD\b.*\bGALICIA\b|\bGALICIA\b.*\bMASTERCARD\b|\bTGM\b", blob):
+    if re.search(r"\bMASTERCARD\b.*\bGALICIA\b|\bGALICIA\b.*\bMASTERCARD\b|\bTGM\b|\bMC\s*GALICIA\b", blob):
         return "TGM"
-    if re.search(r"\bMASTERCARD\b", blob):
+    if re.search(r"\bMASTERCARD\b|\bMASTER\s*CARD\b", blob):
         return "TGM"
     if re.search(r"\bVISA\b", blob):
         return "TNX Visa"
-    if re.search(r"\bMERCADO\s*PAGO\b|\bMP\b", blob):
+    if re.search(r"\bMERCADO\s*PAGO\b|\bMERCADOPAGO\b", blob):
         return "Mercado Pago"
     return "Tarjeta"
 
@@ -254,7 +258,7 @@ def _split_comprobante_from_desc(desc: str) -> Tuple[str, str]:
 
 def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
     """Extract transactions from credit-card / Mercado Pago PDFs.
-    Handles both single-line and multi-line layouts. Fixes taxes, USD, and payments.
+    Robust to TNX / TGM / Visa layouts, taxes, perceptions, installments and previous balance.
     """
     if PdfReader is None:
         st.error("No hay backend PDF instalado (pypdf o PyPDF2).")
@@ -266,7 +270,6 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
         reader = PdfReader(archivo)
         if getattr(reader, "is_encrypted", False):
             try:
-                # pypdf devuelve 0 si la contraseña falla
                 if reader.decrypt(clave or "") == 0:
                     st.error(f"⚠️ Contraseña incorrecta para {filename}.")
                     return pd.DataFrame()
@@ -289,14 +292,48 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
         v = parse_argentine_amount(s)
         return -v if v is not None else None
 
-    # Heurística: si el banco no pone U$S, detectamos comercios típicos en dólares
     def _es_consumo_usd(desc: str) -> bool:
         usd_merchants = [
-            r"AMAZON\b", r"NETFLIX", r"SPOTIFY", r"GOOGLE", r"APPLE", 
-            r"STEAM", r"AIRBNB", r"BOOKING", r"ALIEXPRESS", r"PAYPAL", 
-            r"HBO", r"PRIME VIDEO", r"YOUTUBE", r"DISNEY"
+            r"AMAZON\b", r"NETFLIX", r"SPOTIFY", r"GOOGLE", r"APPLE",
+            r"STEAM", r"AIRBNB", r"BOOKING", r"ALIEXPRESS", r"PAYPAL",
+            r"HBO", r"PRIME VIDEO", r"YOUTUBE", r"DISNEY", r"OPENAI", r"CHATGPT",
         ]
         return bool(re.search("|".join(usd_merchants), desc, re.I))
+
+    # Líneas que deben ignorarse por completo
+    SKIP_PAT = re.compile(
+        r"SALDO\s+ANTERIOR|SALDO\s+ACTUAL|SALDO\s+CERRADO|SALDO\s+EN\s+PESOS|SALDO\s+EN\s+DOLARES|"
+        r"SU\s+PAGO|PAGO\s+EN\s+PESOS|PAGO\s+EN\s+DOLARES|PAGO\s+AUTOMATICO|PAGO\s+DE\s+TARJETA|"
+        r"TOTAL\s+A\s+PAGAR|TOTAL\s+CONSUMOS|SUBTOTAL|CONTIN[UÚ]A|HOJA\s+\d|"
+        r"FECHA\s+DE\s+CIERRE|FECHA\s+DE\s+VENCIMIENTO|LIMITE\s+DE\s+COMPRA|"
+        r"TASA\s+DE\s+INTERES|CFT|TEA|TEM|RESUMEN\s+DE\s+CUENTA|TITULAR|N[UÚ]MERO\s+DE\s+CUENTA",
+        re.I,
+    )
+
+    # Impuestos / percepciones (TGM y otros)
+    TAX_PAT = re.compile(
+        r"IMPUESTO\s+DE\s+SELLOS|IMP\.?\s*SELLOS|PERCEPCION|PERCEP\.?|"
+        r"RG\s*4815|DTO\.?\s*354|DTO\.?\s*2141|IVA\s+RG|IIBB|ING\.?\s*BRUTOS|"
+        r"IMPUESTO\s+PAIS|IMP\.\s*PAIS|DEBITO\s+FISCAL|CREDITO\s+FISCAL",
+        re.I,
+    )
+
+    DATE_PAT = re.compile(r"^(\d{2}/\d{2}/\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})$")
+    # Monto solo en la línea (con o sin símbolo de moneda)
+    AMT_ONLY_PAT = re.compile(
+        r"^(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$", re.I
+    )
+    # Fecha + descripción + monto en la misma línea
+    FULL_LINE_PAT = re.compile(
+        r"^(\d{2}/\d{2}/\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})\s+(.*?)\s+(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$",
+        re.I,
+    )
+    # Descripción + monto (sin fecha) — útil para cuotas e impuestos
+    DESC_AMT_PAT = re.compile(
+        r"^(.+?)\s+(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$", re.I
+    )
+
+    last_fecha: Optional[pd.Timestamp] = None
 
     for page in reader.pages:
         try:
@@ -309,95 +346,160 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
         while i < len(lines):
             line = lines[i]
 
-            # --- Estrategia A: Todo en una sola línea (Regex Clásica) ---
-            m_single = re.search(
-                r"^(\d{2}/\d{2}/\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})\s+(.*?)\s+(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$",
-                line, re.I
-            )
-            if m_single:
-                fecha_s, desc, curr_sym, monto_s = m_single.groups()
-                
-                # Omitimos el pago del resumen para no alterar el neto
-                if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", desc, re.I):
+            # Ignorar encabezados / totales / saldo anterior
+            if SKIP_PAT.search(line):
+                i += 1
+                continue
+
+            # ---------- A) Línea completa: Fecha + Desc + Monto ----------
+            m_full = FULL_LINE_PAT.match(line)
+            if m_full:
+                fecha_s, desc, curr_sym, monto_s = m_full.groups()
+                if SKIP_PAT.search(desc):
                     i += 1
                     continue
-
                 monto = _parse_amount_neg(monto_s)
                 if monto is not None:
+                    fecha = normalize_date(fecha_s)
+                    if fecha is not None:
+                        last_fecha = fecha
                     comp, clean_desc = _split_comprobante_from_desc(desc)
-                    # Asignación inteligente de USD
                     moneda = "USD" if (curr_sym and "U" in curr_sym.upper()) or _es_consumo_usd(clean_desc) else "ARS"
-                    
+                    cat = "Impuestos y Percepciones" if TAX_PAT.search(clean_desc) else "Varios Tarjeta/MP"
                     data.append({
-                        "Fecha": normalize_date(fecha_s),
+                        "Fecha": last_fecha,
                         "Comprobante": comp,
                         "Movimiento": clean_desc,
                         "Monto": monto,
                         "Moneda": moneda,
-                        "Categoria": "Varios Tarjeta/MP",
+                        "Categoria": cat,
                         "Fuente": fuente,
                     })
                 i += 1
                 continue
 
-            # --- Estrategia B: Multilínea (Fecha -> Desc -> Monto) ---
-            if re.match(r"^\d{2}/\d{2}/\d{2,4}$", line) or re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", line):
+            # ---------- B) Solo fecha → buscar desc + monto en siguientes líneas ----------
+            if DATE_PAT.match(line):
                 fecha_s = line
-                desc_parts = []
+                fecha = normalize_date(fecha_s)
+                if fecha is not None:
+                    last_fecha = fecha
+                desc_parts: List[str] = []
                 monto = None
                 moneda = "ARS"
-                
                 j = 1
-                # Miramos hasta 6 líneas hacia adelante (ideal para capturar impuestos dispersos)
-                while j <= 6 and (i + j) < len(lines):
+                while j <= 8 and (i + j) < len(lines):
                     cand = lines[i + j]
-                    
-                    # Si chocamos con otra fecha, detenemos la búsqueda
-                    if re.match(r"^\d{2}/\d{2}/\d{2,4}$", cand) or re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", cand):
+                    if DATE_PAT.match(cand):
                         break
-                        
-                    # Buscamos el monto (puede incluir signos negativos o de moneda)
-                    m_amt = re.match(r"^(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$", cand, re.I)
+                    if SKIP_PAT.search(cand):
+                        j += 1
+                        continue
+                    m_amt = AMT_ONLY_PAT.match(cand)
                     if m_amt:
-                        curr_sym = m_amt.group(1)
+                        curr_sym, raw_amt = m_amt.groups()
                         if curr_sym and "U" in curr_sym.upper():
                             moneda = "USD"
-                        
-                        monto = _parse_amount_neg(m_amt.group(2))
-                        if monto is not None:
-                            j += 1 # Consumimos la línea del monto
+                        parsed = _parse_amount_neg(raw_amt)
+                        if parsed is not None:
+                            monto = parsed
+                            j += 1
                             break
                     else:
-                        # Atrapamos símbolos de moneda sueltos en un renglón
-                        if cand.upper() in ["U$S", "USD", "US$"]:
+                        if cand.upper() in ("U$S", "USD", "US$"):
                             moneda = "USD"
                         elif cand == "$":
                             moneda = "ARS"
                         else:
                             desc_parts.append(cand)
                     j += 1
-                
+
                 if monto is not None:
                     desc = " ".join(desc_parts).strip()
-                    
-                    # Omitimos el pago del resumen
-                    if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", desc, re.I):
-                        i += j
-                        continue
+                    if not SKIP_PAT.search(desc):
+                        comp, clean_desc = _split_comprobante_from_desc(desc)
+                        if moneda == "ARS" and _es_consumo_usd(clean_desc):
+                            moneda = "USD"
+                        cat = "Impuestos y Percepciones" if TAX_PAT.search(clean_desc) else "Varios Tarjeta/MP"
+                        data.append({
+                            "Fecha": last_fecha,
+                            "Comprobante": comp,
+                            "Movimiento": clean_desc,
+                            "Monto": monto,
+                            "Moneda": moneda,
+                            "Categoria": cat,
+                            "Fuente": fuente,
+                        })
+                    i += j
+                    continue
+                i += 1
+                continue
 
+            # ---------- C) Sin fecha: impuestos, cuotas (03/03), o desc+monto ----------
+            # Usa last_fecha si existe
+            m_da = DESC_AMT_PAT.match(line)
+            if m_da and last_fecha is not None:
+                desc, curr_sym, monto_s = m_da.groups()
+                # Evitar que una fecha sola o basura entre como descripción
+                if DATE_PAT.match(desc.strip()):
+                    i += 1
+                    continue
+                if SKIP_PAT.search(desc):
+                    i += 1
+                    continue
+                # El "monto" no debe parecer una fecha (ej. 02/03)
+                if re.match(r"^\d{2}/\d{2}$", monto_s.strip()):
+                    i += 1
+                    continue
+                monto = _parse_amount_neg(monto_s)
+                if monto is not None and abs(monto) >= 0.01:
                     comp, clean_desc = _split_comprobante_from_desc(desc)
-                    
-                    # Verificación final de comercios USD por si faltó el símbolo
-                    if moneda == "ARS" and _es_consumo_usd(clean_desc):
-                        moneda = "USD"
-
+                    moneda = "USD" if (curr_sym and "U" in curr_sym.upper()) or _es_consumo_usd(clean_desc) else "ARS"
+                    is_tax = bool(TAX_PAT.search(clean_desc))
+                    # Cuotas tipo "FARMACITY INTERCOUNTRY 03/03"
+                    cat = "Impuestos y Percepciones" if is_tax else "Varios Tarjeta/MP"
                     data.append({
-                        "Fecha": normalize_date(fecha_s),
+                        "Fecha": last_fecha,
                         "Comprobante": comp,
                         "Movimiento": clean_desc,
                         "Monto": monto,
                         "Moneda": moneda,
-                        "Categoria": "Varios Tarjeta/MP",
+                        "Categoria": cat,
+                        "Fuente": fuente,
+                    })
+                i += 1
+                continue
+
+            # ---------- D) Solo monto (raro) o línea de impuesto con monto al final ya cubierto ----------
+            # Líneas tipo "IMPUESTO DE SELLOS" seguidas de monto en la próxima línea
+            if TAX_PAT.search(line) and last_fecha is not None:
+                desc = line
+                monto = None
+                moneda = "ARS"
+                j = 1
+                while j <= 3 and (i + j) < len(lines):
+                    cand = lines[i + j]
+                    if DATE_PAT.match(cand) or SKIP_PAT.search(cand):
+                        break
+                    m_amt = AMT_ONLY_PAT.match(cand)
+                    if m_amt:
+                        curr_sym, raw_amt = m_amt.groups()
+                        if curr_sym and "U" in curr_sym.upper():
+                            moneda = "USD"
+                        parsed = _parse_amount_neg(raw_amt)
+                        if parsed is not None:
+                            monto = parsed
+                            j += 1
+                            break
+                    j += 1
+                if monto is not None:
+                    data.append({
+                        "Fecha": last_fecha,
+                        "Comprobante": "",
+                        "Movimiento": desc.strip(),
+                        "Monto": monto,
+                        "Moneda": moneda,
+                        "Categoria": "Impuestos y Percepciones",
                         "Fuente": fuente,
                     })
                     i += j
@@ -411,8 +513,16 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
 
     if "Comprobante" not in df.columns:
         df["Comprobante"] = ""
-    df = df.drop_duplicates(subset=["Fecha", "Movimiento", "Monto"])
+    # Limpiar comprobantes vacíos / basura
+    df["Comprobante"] = df["Comprobante"].fillna("").astype(str)
+    df = df.drop_duplicates(subset=["Fecha", "Movimiento", "Monto", "Fuente"])
     df = apply_category_rules(df)
+    # Forzar categoría de impuestos si el nombre lo indica (por si apply_category_rules la pisó)
+    tax_mask = df["Movimiento"].str.contains(
+        r"IMPUESTO\s+DE\s+SELLOS|PERCEPCION|PERCEP\.?|RG\s*4815|DTO\.?\s*354|DTO\.?\s*2141|IMPUESTO\s+PAIS",
+        case=False, na=False, regex=True,
+    )
+    df.loc[tax_mask, "Categoria"] = "Impuestos y Percepciones"
     return df[["Fecha", "Comprobante", "Movimiento", "Monto", "Moneda", "Categoria", "Fuente"]].copy()
 
 
