@@ -4,7 +4,7 @@ Mi Conciliador Financiero — Versión mejorada
 ============================================
 - Bug fixes: signos Galicia, parseo de montos AR, extracción PDF robusta, fechas
 - Mejoras: normalización datetime, filtros, categorías configurables, Plotly
-- Nuevas features: detección de duplicados, matching simple, reportes, Excel
+- Nuevas features: detección de duplicados, matching simple, reportes, Excel, Lector TGM/TGV
 - Refactor: modular, type hints, manejo de errores, session_state
 """
 
@@ -53,24 +53,23 @@ DEFAULT_CATEGORY_RULES: Dict[str, List[str]] = {
     "Sueldo Nora": [r"NORA"],
     "Cuota Rocío": [r"ROCIO", r"ROCÍO"],
     "Celular Esteban": [r"ESTEBAN"],
-    "Supermercado": [r"LIBERTAD", r"AL CAMPO", r"DISCO", r"SUPERMERCADO", r"CARREFOUR", r"JUMBO", r"VEA", r"DIA\b"],
+    "Supermercado": [r"LIBERTAD", r"AL CAMPO", r"DISCO", r"SUPERMERCADO", r"CARREFOUR", r"JUMBO", r"VEA", r"DIA\b", r"TIENDA INGLESA"],
     "Salud y Farmacia": [r"FARMACITY", r"OMINT", r"SANATORIO", r"FARMACIA", r"OSDE", r"SWISS MEDICAL"],
     "Impuestos y Servicios": [
         r"E\.P\.E\.C", r"ECOGAS", r"MUNICIPALIDAD", r"CSIERRAS", r"NATURGY",
         r"EDESA", r"RENTAS", r"AYSA", r"METROGAS", r"TELECOM", r"PERSONAL", r"CLARO", r"MOVISTAR",
     ],
-    "Mantenimiento Ford Ranger 2013": [r"YPF", r"AXION", r"COMBUSTIBLE", r"SHELL", r"PUMASHELL"],
+    "Mantenimiento Ford Ranger 2013": [r"YPF", r"AXION", r"COMBUSTIBLE", r"SHELL", r"PUMASHELL", r"ANCAP"],
     "Apps y Transporte": [r"UBER", r"PEDIDOS YA", r"PEDIDOSYA", r"CABIFY", r"DIDI", r"RAPPI"],
     "Rendimiento Inversiones": [r"Ganancia", r"Rendimiento"],
     "Conversión Cripto/Fiwind": [r"Conversión"],
-    "Fiwind Fiat Varios": [],  # fallback for Fiwind
+    "Fiwind Fiat Varios": [],
     "Varios Bancario": [],
     "Varios Tarjeta/MP": [],
 }
 
 
 def apply_category_rules(df: pd.DataFrame, text_col: str = "Movimiento") -> pd.DataFrame:
-    """Apply configurable regex rules. First match wins (order matters)."""
     if df.empty or text_col not in df.columns:
         return df
     df = df.copy()
@@ -82,7 +81,7 @@ def apply_category_rules(df: pd.DataFrame, text_col: str = "Movimiento") -> pd.D
             continue
         combined = "|".join(patterns)
         mask = df[text_col].str.contains(combined, case=False, na=False, regex=True)
-        # Only overwrite if still default-ish
+        # Solo sobreescribimos si es una categoría genérica (dejamos intactos los impuestos, saldos, etc.)
         default_mask = df["Categoria"].isin(
             ["Varios Bancario", "Varios Tarjeta/MP", "Fiwind Fiat Varios", "Sin categoría", ""]
         )
@@ -94,7 +93,6 @@ def apply_category_rules(df: pd.DataFrame, text_col: str = "Movimiento") -> pd.D
 # Utility helpers
 # ---------------------------------------------------------------------------
 def parse_argentine_amount(value: Any) -> Optional[float]:
-    """Convert Argentine / mixed number formats to float. Returns None on failure."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     if isinstance(value, (int, float)):
@@ -104,7 +102,6 @@ def parse_argentine_amount(value: Any) -> Optional[float]:
     if not s or s.lower() in ("nan", "none", "-"):
         return None
 
-    # 1.234.567,89  or  1.234,89  (AR)  vs  1,234.56 (US)
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -112,7 +109,7 @@ def parse_argentine_amount(value: Any) -> Optional[float]:
             s = s.replace(",", "")
     elif "," in s:
         s = s.replace(",", ".")
-    # remove any remaining thousand separators that are dots only
+        
     if s.count(".") > 1:
         parts = s.split(".")
         s = "".join(parts[:-1]) + "." + parts[-1]
@@ -124,13 +121,22 @@ def parse_argentine_amount(value: Any) -> Optional[float]:
 
 
 def normalize_date(value: Any) -> Optional[pd.Timestamp]:
-    """Parse common date formats found in AR bank / card statements."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     if isinstance(value, (datetime, pd.Timestamp, date)):
         return pd.Timestamp(value)
 
-    s = str(value).strip().split(" ")[0]  # drop time if present
+    s = str(value).strip().split(" ")[0]
+    
+    # Traducción de meses en español (Ej: Galicia usa "Ene", "Abr") para que Pandas no falle
+    meses_esp = {"Ene": "Jan", "Feb": "Feb", "Mar": "Mar", "Abr": "Apr", "May": "May", "Jun": "Jun", 
+                 "Jul": "Jul", "Ago": "Aug", "Sep": "Sep", "Oct": "Oct", "Nov": "Nov", "Dic": "Dec"}
+    m_esp = re.match(r"(\d{2})-([A-Za-z]{3})-(\d{2,4})", s)
+    if m_esp:
+        d, mon, y = m_esp.groups()
+        mon_eng = meses_esp.get(mon.capitalize(), mon)
+        s = f"{d}-{mon_eng}-{y}"
+
     formats = [
         "%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y",
         "%d-%b-%Y", "%d-%b-%y", "%d-%B-%Y", "%d-%B-%y",
@@ -140,7 +146,6 @@ def normalize_date(value: Any) -> Optional[pd.Timestamp]:
             return pd.Timestamp(datetime.strptime(s, fmt))
         except ValueError:
             continue
-    # last resort
     try:
         return pd.to_datetime(s, dayfirst=True, errors="coerce")
     except Exception:
@@ -148,7 +153,6 @@ def normalize_date(value: Any) -> Optional[pd.Timestamp]:
 
 
 def safe_read_excel(uploaded_file, **kwargs) -> pd.DataFrame:
-    """Read Excel with basic error handling."""
     try:
         return pd.read_excel(uploaded_file, **kwargs)
     except Exception as e:
@@ -160,7 +164,6 @@ def safe_read_excel(uploaded_file, **kwargs) -> pd.DataFrame:
 # Source parsers
 # ---------------------------------------------------------------------------
 def leer_excel_galicia(archivo) -> pd.DataFrame:
-    """Parse Banco Galicia extract (ARS or USD). Gastos (Débito) siempre negativos."""
     name = getattr(archivo, "name", str(archivo)).upper()
     df = safe_read_excel(
         archivo,
@@ -177,8 +180,7 @@ def leer_excel_galicia(archivo) -> pd.DataFrame:
     df["Débito"] = df["Débito"].map(parse_argentine_amount)
     df["Crédito"] = df["Crédito"].map(parse_argentine_amount)
 
-    # Gastos (Débito) negativos, créditos positivos
-    debito = df["Débito"].fillna(0.0).abs()   # por si viene con signo
+    debito = df["Débito"].fillna(0.0).abs()
     credito = df["Crédito"].fillna(0.0).abs()
     df["Monto"] = credito - debito
 
@@ -195,67 +197,45 @@ def leer_excel_galicia(archivo) -> pd.DataFrame:
 
 
 def _detect_card_fuente(filename: str, sample_text: str) -> str:
-    """Detecta la tarjeta y devuelve el código de Fuente."""
     blob = f"{filename} {sample_text}".upper()
-    # Orden importa: más específico primero
+    filename_no_ext = filename.rsplit(".", 1)[0]
+    
+    # Si es Galicia, forzamos a que la fuente sea exactamente el nombre del archivo (Ej: TGM 2026.01.16)
+    if re.search(r"\bGALICIA\b", blob):
+        return filename_no_ext
+        
     if re.search(r"\bNX\s*VISA\b|\bNARANJA\s*X\s*VISA\b|\bTNX\s*VISA\b", blob):
         return "TNX Visa"
     if re.search(r"\bNARANJA\s*X\b|\bTNX\b", blob):
         return "TNX"
-    if re.search(r"\bMASTERCARD\b.*\bGALICIA\b|\bGALICIA\b.*\bMASTERCARD\b|\bTGM\b", blob):
-        return "TGM"
-    if re.search(r"\bMASTERCARD\b", blob):
-        return "TGM"
-    if re.search(r"\bVISA\b", blob):
-        return "TNX Visa"
     if re.search(r"\bMERCADO\s*PAGO\b|\bMP\b", blob):
         return "Mercado Pago"
-    return "Tarjeta"
+    return filename_no_ext
 
 
 def _split_comprobante_from_desc(desc: str) -> Tuple[str, str]:
-    """
-    Separa el número de comprobante/cupón del final (o inicio) de la descripción.
-    Ejemplos:
-      'PAGOS360*MUNICORDO 04746'           → ('04746', 'PAGOS360*MUNICORDO')
-      'FARMACITY INTERCOUNTRY 02/03 02382' → ('02382', 'FARMACITY INTERCOUNTRY 02/03')
-      'Naranja X 54 OFICINA Y ARTE ...'    → ('54', 'OFICINA Y ARTE ...')
-    """
     if not desc:
         return "", ""
-
     original = desc.strip()
-
-    # 1) Número al final (4-8 dígitos), típico Galicia / TGM
     m = re.search(r"\s+(\d{4,8})$", original)
     if m:
         return m.group(1), original[: m.start()].strip()
-
-    # 2) Patrón Naranja X / TNX: "Naranja X 54 DESCRIPCION" o "54 DESCRIPCION"
     m = re.match(r"^(?:NARANJA\s*X|TNX|NX)\s+(\d{2,8})\s+(.+)$", original, re.I)
     if m:
         return m.group(1), m.group(2).strip()
-
-    # 3) Número corto al inicio seguido de texto
     m = re.match(r"^(\d{2,6})\s+(.+)$", original)
     if m:
         return m.group(1), m.group(2).strip()
-
-    # 4) Etiquetas explícitas
     m = re.search(r"(?:CUP[OÓ]N|AUT|OPER|NRO|N[°º]|REF)[:\s#]*([0-9]{4,14})", original, re.I)
     if m:
         comp = m.group(1)
         cleaned = (original[: m.start()] + original[m.end() :]).strip()
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         return comp, cleaned
-
     return "", original
 
 
 def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
-    """Extract transactions from credit-card / Mercado Pago PDFs.
-    Handles both single-line and multi-line layouts. Fixes taxes, USD, and payments.
-    """
     if PdfReader is None:
         st.error("No hay backend PDF instalado (pypdf o PyPDF2).")
         return pd.DataFrame()
@@ -266,12 +246,11 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
         reader = PdfReader(archivo)
         if getattr(reader, "is_encrypted", False):
             try:
-                # pypdf devuelve 0 si la contraseña falla
                 if reader.decrypt(clave or "") == 0:
                     st.error(f"⚠️ Contraseña incorrecta para {filename}.")
                     return pd.DataFrame()
             except Exception as e:
-                st.error(f"⚠️ No se pudo desencriptar '{filename}'. Verifica la contraseña. ({e})")
+                st.error(f"⚠️ No se pudo desencriptar '{filename}'. ({e})")
                 return pd.DataFrame()
     except Exception as e:
         st.error(f"Error abriendo PDF: {e}")
@@ -283,13 +262,10 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
             sample_text += (page.extract_text() or "") + "\n"
         except Exception:
             pass
+            
     fuente = _detect_card_fuente(filename, sample_text)
+    is_galicia = bool(re.search(r"\bGALICIA\b|\bMASTERCARD PLATINUM\b", sample_text.upper()))
 
-    def _parse_amount_neg(s: str) -> Optional[float]:
-        v = parse_argentine_amount(s)
-        return -v if v is not None else None
-
-    # Heurística: si el banco no pone U$S, detectamos comercios típicos en dólares
     def _es_consumo_usd(desc: str) -> bool:
         usd_merchants = [
             r"AMAZON\b", r"NETFLIX", r"SPOTIFY", r"GOOGLE", r"APPLE", 
@@ -298,49 +274,171 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
         ]
         return bool(re.search("|".join(usd_merchants), desc, re.I))
 
+    lines = []
+    full_text = ""
     for page in reader.pages:
         try:
             text = page.extract_text() or ""
+            full_text += text + "\n"
+            lines.extend([ln.strip() for ln in text.split("\n") if ln.strip()])
         except Exception:
-            continue
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            pass
+
+    if is_galicia:
+        cierre_actual = None
+        cierre_str = ""
+        # Buscamos la fila de fechas en el encabezado
+        m_dates = re.search(r"(\d{2}-[A-Za-z]{3}-\d{2,4})\s+(\d{2}-[A-Za-z]{3}-\d{2,4})\s+(\d{2}-[A-Za-z]{3}-\d{2,4})", full_text)
+        if m_dates:
+            cierre_actual = normalize_date(m_dates.group(3))
+            if cierre_actual:
+                cierre_str = cierre_actual.strftime("CIE-%Y.%m.%d")
 
         i = 0
         while i < len(lines):
             line = lines[i]
 
-            # --- Estrategia A: Todo en una sola línea (Regex Clásica) ---
+            # 1. Bloque Consolidado (Saldos, Impuestos, Pagos)
+            m_cons = re.match(
+                r"^(?:(\d{2}-[A-Za-z]{3}-\d{2,4})\s+)?(SALDO ANTERIOR|SU PAGO|PAGO CAJERO/INTERNET|SALDO PENDIENTE|IMPUESTO DE SELLOS|PERCEPCION\s+IVA.*?|PERCEP\.AFIP.*?|CORDOBA\s+DTO.*?)\s+([\-\d\.\,]+)(?:\s+([\-\d\.\,]+))?$", 
+                line, re.I
+            )
+            if m_cons:
+                f_str, desc, amt1_str, amt2_str = m_cons.groups()
+                desc_upper = desc.strip().upper()
+                
+                amt1 = parse_argentine_amount(amt1_str)
+                amt2 = parse_argentine_amount(amt2_str) if amt2_str else None
+                
+                cat = "Varios Tarjeta/MP"
+                if "IMPUESTO" in desc_upper or "PERCEPCION" in desc_upper or "DTO" in desc_upper:
+                    cat = "Impuestos"
+                elif "PAGO" in desc_upper:
+                    cat = "Depósito"
+                    
+                sign = 1 if "PAGO" in desc_upper else -1
+                fecha_val = normalize_date(f_str) if f_str else cierre_actual
+                
+                # Tratamiento especial para el Saldo Anterior de Enero
+                if desc_upper == "SALDO ANTERIOR" and cierre_actual and cierre_actual.month == 1:
+                    desc_final = "SALDO ANTERIOR (Por única vez se pone el saldo del año anterior, por ser el CIERRE Enero)"
+                    cat = f"Año {cierre_actual.year - 1}"
+                else:
+                    desc_final = desc_upper
+                    
+                if amt1 is not None and (amt1 != 0 or "PENDIENTE" in desc_upper or "ANTERIOR" in desc_upper):
+                    data.append({
+                        "Fecha": fecha_val,
+                        "Comprobante": cierre_str,
+                        "Movimiento": desc_final,
+                        "Monto": abs(amt1) * sign if amt1 != 0 else 0.0,
+                        "Moneda": "ARS",
+                        "Categoria": cat,
+                        "Fuente": fuente
+                    })
+                    
+                if amt2 is not None and (amt2 != 0 or "PENDIENTE" in desc_upper or "ANTERIOR" in desc_upper):
+                    data.append({
+                        "Fecha": fecha_val,
+                        "Comprobante": cierre_str,
+                        "Movimiento": desc_final,
+                        "Monto": abs(amt2) * sign if amt2 != 0 else 0.0,
+                        "Moneda": "USD",
+                        "Categoria": cat,
+                        "Fuente": fuente
+                    })
+                i += 1
+                continue
+                
+            # 2. Bloque Detalle de Consumos (Compras en Cuotas / 1 Pago)
+            if re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", line):
+                fecha_s = line
+                desc_parts = []
+                comp = ""
+                monto = None
+                moneda = "ARS"
+                
+                j = 1
+                while j <= 8 and (i + j) < len(lines):
+                    cand = lines[i + j]
+                    # Cortar búsqueda si encontramos otra fecha u otra palabra reservada
+                    if re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", cand) or \
+                       re.match(r"^(?:SALDO|SU PAGO|PAGO|IMPUESTO|PERCEPCION|CORDOBA)", cand, re.I):
+                        break
+                        
+                    m_amt = re.match(r"^([\-\d\.\,]+)$", cand)
+                    if re.match(r"^\d{4,8}$", cand) and not comp:
+                        comp = cand
+                    elif m_amt and comp:
+                        val = parse_argentine_amount(cand)
+                        if val is not None:
+                            monto = -val # Los gastos vienen en positivo y los pasamos a negativo
+                            j += 1
+                            break
+                    elif m_amt and not comp and ("," in cand or "." in cand):
+                        val = parse_argentine_amount(cand)
+                        if val is not None:
+                            monto = -val
+                            j += 1
+                            break
+                    else:
+                        desc_parts.append(cand)
+                    j += 1
+                    
+                if monto is not None:
+                    desc_tx = " ".join(desc_parts).strip()
+                    if re.search(r"\b(USD|US\$|U\$S|USA|URY|UYU|BRL|EUR|GBP)\b", desc_tx, re.I) or _es_consumo_usd(desc_tx):
+                        moneda = "USD"
+                        
+                    data.append({
+                        "Fecha": normalize_date(fecha_s),
+                        "Comprobante": comp,
+                        "Movimiento": desc_tx,
+                        "Monto": monto,
+                        "Moneda": moneda,
+                        "Categoria": "Varios Tarjeta/MP",
+                        "Fuente": fuente
+                    })
+                i += j
+                continue
+                
+            i += 1
+
+    else:
+        # Lógica original para Naranja X / Mercado Pago
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
             m_single = re.search(
                 r"^(\d{2}/\d{2}/\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})\s+(.*?)\s+(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$",
                 line, re.I
             )
             if m_single:
                 fecha_s, desc, curr_sym, monto_s = m_single.groups()
-                
-                # Omitimos el pago del resumen para no alterar el neto
-                if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", desc, re.I):
-                    i += 1
-                    continue
-
-                monto = _parse_amount_neg(monto_s)
+                monto = parse_argentine_amount(monto_s)
                 if monto is not None:
+                    monto = -monto
                     comp, clean_desc = _split_comprobante_from_desc(desc)
-                    # Asignación inteligente de USD
                     moneda = "USD" if (curr_sym and "U" in curr_sym.upper()) or _es_consumo_usd(clean_desc) else "ARS"
                     
+                    cat = "Varios Tarjeta/MP"
+                    if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", clean_desc, re.I):
+                        monto = abs(monto)
+                        cat = "Depósito"
+
                     data.append({
                         "Fecha": normalize_date(fecha_s),
                         "Comprobante": comp,
                         "Movimiento": clean_desc,
                         "Monto": monto,
                         "Moneda": moneda,
-                        "Categoria": "Varios Tarjeta/MP",
+                        "Categoria": cat,
                         "Fuente": fuente,
                     })
                 i += 1
                 continue
 
-            # --- Estrategia B: Multilínea (Fecha -> Desc -> Monto) ---
             if re.match(r"^\d{2}/\d{2}/\d{2,4}$", line) or re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", line):
                 fecha_s = line
                 desc_parts = []
@@ -348,27 +446,23 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
                 moneda = "ARS"
                 
                 j = 1
-                # Miramos hasta 6 líneas hacia adelante (ideal para capturar impuestos dispersos)
                 while j <= 6 and (i + j) < len(lines):
                     cand = lines[i + j]
-                    
-                    # Si chocamos con otra fecha, detenemos la búsqueda
                     if re.match(r"^\d{2}/\d{2}/\d{2,4}$", cand) or re.match(r"^\d{2}-[A-Za-z]{3}-\d{2,4}$", cand):
                         break
                         
-                    # Buscamos el monto (puede incluir signos negativos o de moneda)
                     m_amt = re.match(r"^(?:(U\$S|USD|US\$|\$)\s*)?([\-\d\.\,]+)$", cand, re.I)
                     if m_amt:
                         curr_sym = m_amt.group(1)
                         if curr_sym and "U" in curr_sym.upper():
                             moneda = "USD"
                         
-                        monto = _parse_amount_neg(m_amt.group(2))
-                        if monto is not None:
-                            j += 1 # Consumimos la línea del monto
+                        val = parse_argentine_amount(m_amt.group(2))
+                        if val is not None:
+                            monto = -val
+                            j += 1
                             break
                     else:
-                        # Atrapamos símbolos de moneda sueltos en un renglón
                         if cand.upper() in ["U$S", "USD", "US$"]:
                             moneda = "USD"
                         elif cand == "$":
@@ -379,17 +473,15 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
                 
                 if monto is not None:
                     desc = " ".join(desc_parts).strip()
-                    
-                    # Omitimos el pago del resumen
-                    if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", desc, re.I):
-                        i += j
-                        continue
-
                     comp, clean_desc = _split_comprobante_from_desc(desc)
                     
-                    # Verificación final de comercios USD por si faltó el símbolo
                     if moneda == "ARS" and _es_consumo_usd(clean_desc):
                         moneda = "USD"
+
+                    cat = "Varios Tarjeta/MP"
+                    if re.search(r"SU PAGO|PAGO EN PESOS|PAGO EN DOLARES|PAGO AUTOMATICO|PAGO DE TARJETA", clean_desc, re.I):
+                        monto = abs(monto)
+                        cat = "Depósito"
 
                     data.append({
                         "Fecha": normalize_date(fecha_s),
@@ -397,12 +489,11 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
                         "Movimiento": clean_desc,
                         "Monto": monto,
                         "Moneda": moneda,
-                        "Categoria": "Varios Tarjeta/MP",
+                        "Categoria": cat,
                         "Fuente": fuente,
                     })
                     i += j
                     continue
-
             i += 1
 
     df = pd.DataFrame(data)
@@ -411,13 +502,13 @@ def extraer_tarjeta_pdf(archivo, clave: str = "") -> pd.DataFrame:
 
     if "Comprobante" not in df.columns:
         df["Comprobante"] = ""
+    
     df = df.drop_duplicates(subset=["Fecha", "Movimiento", "Monto"])
     df = apply_category_rules(df)
     return df[["Fecha", "Comprobante", "Movimiento", "Monto", "Moneda", "Categoria", "Fuente"]].copy()
 
 
 def leer_excel_fiwind(archivo) -> pd.DataFrame:
-    """Process Fiwind fiat operations (incl. conversions)."""
     df = safe_read_excel(archivo)
     if df.empty:
         return pd.DataFrame()
@@ -484,7 +575,6 @@ def leer_excel_fiwind(archivo) -> pd.DataFrame:
 # Higher-level analytics
 # ---------------------------------------------------------------------------
 def detect_duplicates(df: pd.DataFrame, date_tol_days: int = 2, amount_tol: float = 1.0) -> pd.DataFrame:
-    """Flag possible duplicates across sources (same |amount|, close dates)."""
     if df.empty or len(df) < 2:
         df = df.copy()
         df["Posible_Duplicado"] = False
@@ -513,7 +603,6 @@ def detect_duplicates(df: pd.DataFrame, date_tol_days: int = 2, amount_tol: floa
 
 
 def build_monthly_report(df: pd.DataFrame) -> pd.DataFrame:
-    """Monthly income / expense / net by currency."""
     if df.empty or "Fecha" not in df.columns:
         return pd.DataFrame()
     tmp = df.copy()
@@ -540,7 +629,6 @@ def build_monthly_report(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Export DataFrame to formatted Excel bytes."""
     buffer = io.BytesIO()
     export_df = df.copy()
     if "Fecha" in export_df.columns:
@@ -564,7 +652,6 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ---------------------------------------------------------------------------
 # UI helpers
 # ---------------------------------------------------------------------------
-# Monedas que usan formato argentino: . miles  ,  decimal
 _FIAT_AND_STABLE = {
     "ARS", "USD", "USDT", "USDC", "DAI", "BUSD", "TUSD", "USDP",
     "FRAX", "GUSD", "USDD", "FDUSD", "EURC", "PYUSD",
@@ -572,7 +659,6 @@ _FIAT_AND_STABLE = {
 
 
 def format_monto_display(value: Any, moneda: str) -> str:
-    """Formatea montos: ARS/USD/stablecoins con . miles y , decimal. Resto sin cambiar estilo."""
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -580,18 +666,16 @@ def format_monto_display(value: Any, moneda: str) -> str:
 
     mon = (moneda or "").upper()
     if mon in _FIAT_AND_STABLE:
-        # Formato argentino: 1.234.567,89
-        formatted = f"{v:,.2f}"  # 1,234,567.89
+        formatted = f"{v:,.2f}" 
         formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
         return formatted
-    # Otras criptos: formato estándar con punto decimal
     return f"{v:,.8f}".rstrip("0").rstrip(".") if abs(v) < 1 else f"{v:,.4f}".rstrip("0").rstrip(".")
 
 
 def metric_row(df: pd.DataFrame, moneda: str):
     sub = df[df["Moneda"] == moneda]
     ingresos = sub.loc[sub["Monto"] > 0, "Monto"].sum()
-    gastos = sub.loc[sub["Monto"] < 0, "Monto"].sum()  # already negative
+    gastos = sub.loc[sub["Monto"] < 0, "Monto"].sum()
     neto = sub["Monto"].sum()
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"Movimientos ({moneda})", f"{len(sub):,}")
@@ -605,9 +689,8 @@ def metric_row(df: pd.DataFrame, moneda: str):
 # ---------------------------------------------------------------------------
 def main():
     st.title("📊 Conciliador Bancario y Tarjetas (Integración Fiwind)")
-    st.caption(f"PDF backend: {_PDF_BACKEND or 'ninguno'} · Versión mejorada")
+    st.caption(f"PDF backend: {_PDF_BACKEND or 'ninguno'} · Versión con Lector Inteligente Galicia")
 
-    # Sidebar – global options
     with st.sidebar:
         st.header("⚙️ Opciones")
         mp_clave = st.text_input(
@@ -627,7 +710,6 @@ def main():
                     st.markdown(f"**{cat}**")
                     st.code(" | ".join(pats), language="text")
 
-    # File uploaders
     st.write("Sube tus archivos para comenzar la conciliación. El sistema unifica todo en una vista.")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -643,7 +725,6 @@ def main():
             "3️⃣ Excel Fiwind", type=["xlsx", "xls"], accept_multiple_files=True
         )
 
-    # Botón centrado y con ancho ~1/3
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
     with btn_col2:
         process = st.button("🔄 Procesar / Actualizar", type="primary", use_container_width=True)
@@ -689,9 +770,8 @@ def main():
         if "Comprobante" not in df_final.columns:
             df_final["Comprobante"] = ""
         df_final["Comprobante"] = df_final["Comprobante"].fillna("").astype(str)
-        # Ensure Fecha is datetime
+        
         df_final["Fecha"] = pd.to_datetime(df_final["Fecha"], errors="coerce")
-        # Orden de columnas: Fecha, Comprobante, ...
         cols = ["Fecha", "Comprobante", "Movimiento", "Monto", "Moneda", "Categoria", "Fuente"]
         extra = [c for c in df_final.columns if c not in cols]
         df_final = df_final[[c for c in cols if c in df_final.columns] + extra]
@@ -708,7 +788,6 @@ def main():
     if "Fecha" in df_final.columns:
         df_final["Fecha"] = pd.to_datetime(df_final["Fecha"], errors="coerce")
 
-    # ------------------ Filters ------------------
     st.markdown("---")
     st.subheader("🔍 Filtros")
     f1, f2, f3, f4 = st.columns(4)
@@ -725,7 +804,6 @@ def main():
     with f4:
         only_dups = st.checkbox("Solo posibles duplicados", value=False)
 
-    # Date range
     start_d = end_d = None
     valid_dates = df_final["Fecha"].dropna()
     if not valid_dates.empty:
@@ -756,7 +834,6 @@ def main():
 
     df_filt = df_final.loc[mask].copy()
 
-    # ------------------ Tabs ------------------
     tab_mov, tab_res, tab_rep, tab_dup = st.tabs(
         ["📝 Movimientos", "💰 Resumen & Charts", "📅 Reportes mensuales", "🔁 Posibles duplicados"]
     )
@@ -766,19 +843,18 @@ def main():
             st.markdown(f"#### {m}")
             metric_row(df_filt, m)
 
-        # Display copy: fechas legibles + montos con formato AR para fiat/stablecoins
         display_df = df_filt.copy()
         if "Fecha" in display_df.columns:
             display_df["Fecha"] = display_df["Fecha"].dt.strftime("%Y-%m-%d").fillna("")
         if "Comprobante" not in display_df.columns:
             display_df["Comprobante"] = ""
-        # Formatear Monto según moneda (ARS/USD/stable → 1.234,56 ; otras cripto sin cambiar)
+            
         if "Monto" in display_df.columns and "Moneda" in display_df.columns:
             display_df["Monto"] = [
                 format_monto_display(v, m)
                 for v, m in zip(display_df["Monto"], display_df["Moneda"])
             ]
-        # Orden: Fecha | Comprobante | resto
+            
         preferred = ["Fecha", "Comprobante", "Movimiento", "Monto", "Moneda", "Categoria", "Fuente", "Posible_Duplicado"]
         ordered = [c for c in preferred if c in display_df.columns]
         ordered += [c for c in display_df.columns if c not in ordered]
@@ -913,7 +989,6 @@ def main():
                 "Revisá manualmente: un mismo gasto puede aparecer en el extracto bancario "
                 "y también en el resumen de la tarjeta o en Fiwind."
             )
-
 
 if __name__ == "__main__":
     main()
